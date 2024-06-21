@@ -45,6 +45,7 @@ written by
 #include "threadname.h"
 
 
+using namespace std;
 
 
 bool Upload(UriParser& srt, UriParser& file);
@@ -105,7 +106,7 @@ class SrtMainLoop
     std::exception_ptr m_input_xp;
 
     void InputRunner();
-    volatile bool m_input_running = false;
+    srt::sync::atomic<bool> m_input_running;
 
 public:
     SrtMainLoop(const string& srt_uri, bool input_echoback, const string& input_spec, const vector<string>& output_spec);

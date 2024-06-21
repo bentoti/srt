@@ -11,6 +11,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "test_env.h"
 
 #ifdef _WIN32
 #define INC_SRT_WIN_WINTIME // exclude gettimeofday from srt headers
@@ -18,16 +19,20 @@
 
 #include "srt.h"
 
+#include <array>
 #include <thread>
 #include <fstream>
 #include <ctime>
+#include <random>
 #include <vector>
+#include <atomic>
 
 //#pragma comment (lib, "ws2_32.lib")
 
 TEST(Transmission, FileUpload)
 {
-    srt_startup();
+    srt::TestInit srtinit;
+    srtinit.HandlePerTestOptions();
 
     // Generate the source file
     // We need a file that will contain more data
@@ -35,7 +40,7 @@ TEST(Transmission, FileUpload)
 
     SRTSOCKET sock_lsn = srt_create_socket(), sock_clr = srt_create_socket();
 
-    int tt = SRTT_FILE;
+    const int tt = SRTT_FILE;
     srt_setsockflag(sock_lsn, SRTO_TRANSTYPE, &tt, sizeof tt);
     srt_setsockflag(sock_clr, SRTO_TRANSTYPE, &tt, sizeof tt);
 
@@ -75,11 +80,13 @@ TEST(Transmission, FileUpload)
         std::ofstream outfile("file.source", std::ios::out | std::ios::binary);
         ASSERT_EQ(!!outfile, true) << srt_getlasterror_str();
 
-        srand(time(0));
+        std::random_device rd;
+        std::mt19937 mtrd(rd());
+        std::uniform_int_distribution<short> dis(0, UINT8_MAX);
 
         for (size_t i = 0; i < filesize; ++i)
         {
-            char outbyte = rand() % 255;
+            char outbyte = dis(mtrd);
             outfile.write(&outbyte, 1);
         }
     }
@@ -88,7 +95,7 @@ TEST(Transmission, FileUpload)
 
     // Start listener-receiver thread
 
-    bool thread_exit = false;
+    std::atomic<bool> thread_exit { false };
 
     auto client = std::thread([&]
     {
@@ -111,10 +118,15 @@ TEST(Transmission, FileUpload)
         for (;;)
         {
             int n = srt_recv(accepted_sock, buf.data(), 1456);
-            ASSERT_NE(n, SRT_ERROR);
+            EXPECT_NE(n, SRT_ERROR) << srt_getlasterror_str();
             if (n == 0)
             {
                 std::cerr << "Received 0 bytes, breaking.\n";
+                break;
+            }
+            else if (n == -1)
+            {
+                std::cerr << "READ FAILED, breaking anyway\n";
                 break;
             }
 
@@ -145,7 +157,7 @@ TEST(Transmission, FileUpload)
         size_t shift = 0;
         while (n > 0)
         {
-            const int st = srt_send(sock_clr, buf.data()+shift, n);
+            const int st = srt_send(sock_clr, buf.data()+shift, int(n));
             ASSERT_GT(st, 0) << srt_getlasterror_str();
 
             n -= st;
@@ -168,7 +180,7 @@ TEST(Transmission, FileUpload)
     std::cout << "Sockets closed, joining receiver thread\n";
     client.join();
 
-    std::ifstream tarfile("file.target");
+    std::ifstream tarfile("file.target", std::ios::in | std::ios::binary);
     EXPECT_EQ(!!tarfile, true);
 
     tarfile.seekg(0, std::ios::end);
@@ -177,8 +189,14 @@ TEST(Transmission, FileUpload)
 
     std::cout << "Comparing files\n";
     // Compare files
-    tarfile.seekg(0, std::ios::end);
-    ifile.seekg(0, std::ios::beg);
+
+    // Theoretically it should work if you just rewind to 0, but
+    // on Windows this somehow doesn't work. 
+    tarfile.close();
+    tarfile.open("file.target", std::ios::in | std::ios::binary);
+
+    ifile.close();
+    ifile.open("file.source", std::ios::in | std::ios::binary);
 
     for (size_t i = 0; i < tar_size; ++i)
     {
@@ -191,5 +209,4 @@ TEST(Transmission, FileUpload)
     remove("file.source");
     remove("file.target");
 
-    (void)srt_cleanup();
 }

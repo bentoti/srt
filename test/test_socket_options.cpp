@@ -10,10 +10,11 @@
  *             Haivision Systems Inc.
  */
 
-#include <gtest/gtest.h>
 #include <future>
 #include <thread>
 #include <string>
+#include <gtest/gtest.h>
+#include "test_env.h"
 
 // SRT includes
 #include "any.hpp"
@@ -21,10 +22,11 @@
 #include "srt.h"
 
 using namespace std;
+using namespace srt;
 
 
 class TestSocketOptions
-    : public ::testing::Test
+    : public ::srt::Test
 {
 protected:
     TestSocketOptions()
@@ -68,6 +70,9 @@ public:
         };
         auto accept_res = async(launch::async, accept_async, m_listen_sock);
 
+        // Make sure the thread was kicked
+        this_thread::yield();
+
         const int connect_res = Connect();
         EXPECT_EQ(connect_res, SRT_SUCCESS);
 
@@ -78,10 +83,9 @@ public:
     }
 
 protected:
-    // SetUp() is run immediately before a test starts.
-    void SetUp()
+    // setup() is run immediately before a test starts.
+    void setup()
     {
-        ASSERT_GE(srt_startup(), 0);
         const int yes = 1;
 
         memset(&m_sa, 0, sizeof m_sa);
@@ -100,18 +104,15 @@ protected:
         ASSERT_EQ(srt_setsockopt(m_listen_sock, 0, SRTO_SNDSYN, &yes, sizeof yes), SRT_SUCCESS); // for async connect
     }
 
-    void TearDown()
+    void teardown()
     {
         // Code here will be called just after the test completes.
         // OK to throw exceptions from here if needed.
-        ASSERT_NE(srt_close(m_caller_sock), SRT_ERROR);
-        ASSERT_NE(srt_close(m_listen_sock), SRT_ERROR);
-        srt_cleanup();
+        EXPECT_NE(srt_close(m_caller_sock), SRT_ERROR);
+        EXPECT_NE(srt_close(m_listen_sock), SRT_ERROR);
     }
 
 protected:
-    // put in any custom data members that you need
-
     sockaddr_in m_sa;
     SRTSOCKET m_caller_sock = SRT_INVALID_SOCK;
     SRTSOCKET m_listen_sock = SRT_INVALID_SOCK;
@@ -174,7 +175,10 @@ const OptionTestEntry g_test_matrix_options[] =
     //SRTO_EVENT
     { SRTO_FC,                      "SRTO_FC",  RestrictionType::PRE,     sizeof(int),               32,  INT32_MAX,    25600,        10000,   {-1, 31} },
     //SRTO_GROUPCONNECT
-    //SRTO_GROUPSTABTIMEO
+#if ENABLE_BONDING
+    // Max value can't exceed SRTO_PEERIDLETIMEO
+    { SRTO_GROUPMINSTABLETIMEO, "SRTO_GROUPMINSTABLETIMEO", RestrictionType::PRE, sizeof(int),       60,       5000,       60,           70,     {0, -1, 50, 5001} },
+#endif
     //SRTO_GROUPTYPE
     //SRTO_INPUTBW
     //SRTO_IPTOS
@@ -187,9 +191,12 @@ const OptionTestEntry g_test_matrix_options[] =
     { SRTO_LATENCY,             "SRTO_LATENCY", RestrictionType::PRE,     sizeof(int),                 0, INT32_MAX,      120,          200,  {-1} },
     //SRTO_LINGER
     { SRTO_LOSSMAXTTL,       "SRTO_LOSSMAXTTL", RestrictionType::POST,    sizeof(int),                 0, INT32_MAX,        0,           10,   {} },
-    //SRTO_MAXBW
+    { SRTO_MAXBW,                 "SRTO_MAXBW", RestrictionType::POST, sizeof(int64_t),      int64_t(-1),  INT64_MAX, int64_t(-1), int64_t(200000),  {int64_t(-2)}},
+#ifdef ENABLE_MAXREXMITBW
+    { SRTO_MAXREXMITBW,      "SRTO_MAXREXMITBW", RestrictionType::POST, sizeof(int64_t),     int64_t(-1), INT64_MAX,  int64_t(-1), int64_t(200000),  {int64_t(-2)}},
+#endif
     { SRTO_MESSAGEAPI,       "SRTO_MESSAGEAPI", RestrictionType::PRE,    sizeof(bool),             false,      true,     true,        false,     {} },
-    //SRTO_MININPUTBW
+    { SRTO_MININPUTBW,       "SRTO_MININPUTBW", RestrictionType::POST, sizeof(int64_t),       int64_t(0),  INT64_MAX,  int64_t(0), int64_t(200000),  {int64_t(-1)}},
     { SRTO_MINVERSION,       "SRTO_MINVERSION", RestrictionType::PRE,     sizeof(int),                 0,  INT32_MAX, 0x010000,    0x010300,    {} },
     { SRTO_MSS,                     "SRTO_MSS", RestrictionType::PREBIND, sizeof(int),                76,     65536,     1500,        1400,    {-1, 0, 75} },
     { SRTO_NAKREPORT,         "SRTO_NAKREPORT", RestrictionType::PRE,    sizeof(bool),             false,      true,     true,        false,     {} },
@@ -233,7 +240,7 @@ template<class ValueType>
 void CheckGetSockOpt(const OptionTestEntry& entry, SRTSOCKET sock, const ValueType& value, const char* desc)
 {
     ValueType opt_val;
-    int opt_len = 0;
+    int opt_len = (int) entry.opt_len;
     EXPECT_EQ(srt_getsockopt(sock, 0, entry.optid, &opt_val, &opt_len), SRT_SUCCESS)
         << "Getting " << entry.optname << " returned error: " << srt_getlasterror_str();
 
@@ -250,7 +257,7 @@ void CheckGetSockOpt<strptr>(const OptionTestEntry& entry, SRTSOCKET sock, const
     EXPECT_EQ(srt_getsockopt(sock, 0, entry.optid, &opt_val, &opt_len), SRT_SUCCESS)
         << "Getting " << entry.optname << " returned error: " << srt_getlasterror_str();
 
-    EXPECT_EQ(strncmp(opt_val, value, min<int>(opt_len, entry.opt_len)), 0) << desc << ": Wrong " << entry.optname << " value " << opt_val;
+    EXPECT_EQ(strncmp(opt_val, value, min(opt_len, (int)entry.opt_len)), 0) << desc << ": Wrong " << entry.optname << " value " << opt_val;
     EXPECT_EQ(opt_len, entry.opt_len) << desc << "Wrong " << entry.optname << " value length";
 }
 
@@ -258,7 +265,7 @@ template<class ValueType>
 void CheckSetSockOpt(const OptionTestEntry& entry, SRTSOCKET sock, const ValueType& value, int expect_return, const char* desc)
 {
     ValueType opt_val = value;
-    int opt_len = entry.opt_len;
+    int opt_len = (int)entry.opt_len;
     EXPECT_EQ(srt_setsockopt(sock, 0, entry.optid, &opt_val, opt_len), expect_return)
         << "Setting " << entry.optname << " to " << opt_val << " must " << (expect_return == SRT_SUCCESS ? "succeed" : "fail");
 
@@ -849,6 +856,29 @@ TEST_F(TestSocketOptions, StreamIDWrongLen)
     EXPECT_EQ(srt_getlasterror(NULL), SRT_EINVPARAM);
 }
 
+//Check if setting -1 as optlen returns an error 
+TEST_F(TestSocketOptions, StringOptLenInvalid)
+{
+    const string test_string = "test1234567";
+    const string srto_congestion_string ="live";
+    const string fec_config = "fec,cols:10,rows:10";
+
+    EXPECT_EQ(srt_setsockopt(m_caller_sock, 0, SRTO_STREAMID, test_string.c_str(), -1), SRT_ERROR);
+    EXPECT_EQ(srt_getlasterror(NULL), SRT_EINVPARAM);
+
+    EXPECT_EQ(srt_setsockopt(m_caller_sock, 0, SRTO_BINDTODEVICE, test_string.c_str(), -1), SRT_ERROR);
+    EXPECT_EQ(srt_getlasterror(NULL), SRT_EINVPARAM);
+
+    EXPECT_EQ(srt_setsockopt(m_caller_sock, 0, SRTO_CONGESTION, srto_congestion_string.c_str(), -1), SRT_ERROR);
+    EXPECT_EQ(srt_getlasterror(NULL), SRT_EINVPARAM);
+
+    EXPECT_EQ(srt_setsockopt(m_caller_sock, 0, SRTO_PACKETFILTER, fec_config.c_str(), -1), SRT_ERROR);
+    EXPECT_EQ(srt_getlasterror(NULL), SRT_EINVPARAM);
+
+    EXPECT_EQ(srt_setsockopt(m_caller_sock, 0, SRTO_PASSPHRASE, test_string.c_str(), -1), SRT_ERROR);
+    EXPECT_EQ(srt_getlasterror(NULL), SRT_EINVPARAM);
+}
+
 // Try to set/get a 13-character string in SRTO_STREAMID.
 // This tests checks that the StreamID is set to the correct size
 // while it is transmitted as 16 characters in the Stream ID HS extension.
@@ -857,7 +887,7 @@ TEST_F(TestSocketOptions, StreamIDOdd)
     // 13 characters, that is, 3*4+1
     string sid_odd = "something1234";
 
-    EXPECT_EQ(srt_setsockopt(m_caller_sock, 0, SRTO_STREAMID, sid_odd.c_str(), sid_odd.size()), SRT_SUCCESS);
+    EXPECT_EQ(srt_setsockopt(m_caller_sock, 0, SRTO_STREAMID, sid_odd.c_str(), (int)sid_odd.size()), SRT_SUCCESS);
 
     char buffer[CSrtConfig::MAX_SID_LENGTH + 135];
     int buffer_len = sizeof buffer;
@@ -886,7 +916,7 @@ TEST_F(TestSocketOptions, StreamIDEven)
     // 12 characters = 4*3, that is, aligned to 4
     string sid_even = "123412341234";
 
-    EXPECT_EQ(srt_setsockopt(m_caller_sock, 0, SRTO_STREAMID, sid_even.c_str(), sid_even.size()), SRT_SUCCESS);
+    EXPECT_EQ(srt_setsockopt(m_caller_sock, 0, SRTO_STREAMID, sid_even.c_str(), (int)sid_even.size()), SRT_SUCCESS);
 
     char buffer[CSrtConfig::MAX_SID_LENGTH + 135];
     int buffer_len = sizeof buffer;
@@ -922,7 +952,7 @@ TEST_F(TestSocketOptions, StreamIDAlmostFull)
     sid_amost_full[size-2] = 'y';
     sid_amost_full[size-1] = 'z';
 
-    EXPECT_EQ(srt_setsockopt(m_caller_sock, 0, SRTO_STREAMID, sid_amost_full.c_str(), sid_amost_full.size()), SRT_SUCCESS);
+    EXPECT_EQ(srt_setsockopt(m_caller_sock, 0, SRTO_STREAMID, sid_amost_full.c_str(), (int)sid_amost_full.size()), SRT_SUCCESS);
 
     char buffer[CSrtConfig::MAX_SID_LENGTH + 135];
     int buffer_len = sizeof buffer;
@@ -958,7 +988,7 @@ TEST_F(TestSocketOptions, StreamIDFull)
     sid_full[size-2] = 'y';
     sid_full[size-1] = 'z';
 
-    EXPECT_EQ(srt_setsockopt(m_caller_sock, 0, SRTO_STREAMID, sid_full.c_str(), sid_full.size()), SRT_SUCCESS);
+    EXPECT_EQ(srt_setsockopt(m_caller_sock, 0, SRTO_STREAMID, sid_full.c_str(), (int)sid_full.size()), SRT_SUCCESS);
 
     char buffer[CSrtConfig::MAX_SID_LENGTH + 135];
     int buffer_len = sizeof buffer;
@@ -982,27 +1012,30 @@ TEST_F(TestSocketOptions, StreamIDFull)
     ASSERT_NE(srt_close(accepted_sock), SRT_ERROR);
 }
 
+// Check that StreamID assigned to a listener socket is not inherited by accepted sockets,
+// and is not derived by a caller socket.
 TEST_F(TestSocketOptions, StreamIDLenListener)
 {
     string stream_id_13 = "something1234";
 
-    EXPECT_EQ(srt_setsockopt(m_listen_sock, 0, SRTO_STREAMID, stream_id_13.c_str(), stream_id_13.size()), SRT_SUCCESS);
+    EXPECT_EQ(srt_setsockopt(m_listen_sock, 0, SRTO_STREAMID, stream_id_13.c_str(), (int)stream_id_13.size()), SRT_SUCCESS);
 
     char buffer[648];
     int buffer_len = sizeof buffer;
     EXPECT_EQ(srt_getsockopt(m_listen_sock, 0, SRTO_STREAMID, &buffer, &buffer_len), SRT_SUCCESS);
+    EXPECT_EQ(string(buffer), stream_id_13);
+    EXPECT_EQ(size_t(buffer_len), stream_id_13.size());
 
     StartListener();
     const SRTSOCKET accepted_sock = EstablishConnection();
 
-    // Check accepted socket inherits values
+    // Check accepted and caller sockets do not inherit StreamID.
     for (SRTSOCKET sock : { m_caller_sock, accepted_sock })
     {
-        for (size_t i = 0; i < sizeof buffer; ++i)
-            buffer[i] = 'a';
         buffer_len = (int)(sizeof buffer);
+        fill_n(buffer, buffer_len, 'a');
         EXPECT_EQ(srt_getsockopt(sock, 0, SRTO_STREAMID, &buffer, &buffer_len), SRT_SUCCESS);
-        EXPECT_EQ(buffer_len, 0) << (sock == accepted_sock ? "ACCEPTED" : "LISTENER");
+        EXPECT_EQ(buffer_len, 0) << (sock == accepted_sock ? "ACCEPTED" : "CALLER");
     }
 
     ASSERT_NE(srt_close(accepted_sock), SRT_ERROR);
